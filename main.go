@@ -57,15 +57,33 @@ func (w openWeatherMap) temperature(city string) (float64, error) {
 type multiWeatherProvider []weatherProvider
 
 func (w multiWeatherProvider) temperature(city string) (float64, error) {
-    sum := 0.0
+    temps := make(chan float64, len(w))
+    errs := make(chan error, len(w))
 
     for _, provider := range w {
-        k, err := provider.temperature(city)
-        if err != nil {
+        go func(p weatherProvider) {
+            k, err := p.temperature(city)
+            if err != nil {
+                errs <- err
+                return
+            }
+            temps <- k
+        }(provider)
+    }
+
+    sum := 0.0
+
+    // [!] in a kind of sync flavor, with the image of channels
+    // pipe response stream to here, if nothing comes in
+    // nothing comes out, so will hold still here
+    // [!] but I think this is also an explicit-expressing-dependency manner
+    for i := 0; i < len(w); i++ {
+        select {
+        case temp := <-temps:
+            sum += temp
+        case err := <-errs:
             return 0, err
         }
-
-        sum += k
     }
 
     return sum / float64(len(w)), nil

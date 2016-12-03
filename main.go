@@ -4,25 +4,29 @@ package main
 
 // dependency
 import (
-	"encoding/json"
-	"net/http"
-	"strings"
+    "encoding/json"
+    "net/http"
+    "strings"
+    "log"
+    "time"
 )
 
-// define a new type, which is a struct
-type weatherData struct {
-	Name string `json:"name"` // name type tag
-	// tag helps to map json to this struct
-	Main struct {
-		Kelvin float64 `json:"temp"`
-	} `json:"main"`
+// business logic
+type weatherProvider interface {
+    temperature(city string) (float64, error)
+}
+
+type openWeatherMap struct{
+    apiKey string
 }
 
 // return (result, err) is an idiom of Go
-func query(city string) (weatherData, error) {
-	resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?APPID=6c68ab3ee677cf2fe425ff3ac9ab9b6f&q=" + city)
+// [!] this means it is duck typing?
+// the `temperature` "menthod" of `openWeatherMap`
+func (w openWeatherMap) temperature(city string) (float64, error) {
+	resp, err := http.Get("http://api.openweathermap.org/data/2.5/weather?APPID=" + w.apiKey + "&q=" + city)
 	if err != nil {
-		return weatherData{}, err
+		return 0, err
 	}
 
 	// `defer` will execute the function call before out of the scope of query function
@@ -30,19 +34,50 @@ func query(city string) (weatherData, error) {
 	defer resp.Body.Close()
 
 	// use `var` or directly `:=`
-	var d weatherData
+    // inline new type which is a structure
+    var d struct {
+        Main struct {
+            Kelvin float64 `json:"temp"`    // name tag type
+	                                        // tag helps to map json to this struct
+        } `json:"main"`
+    }
 
 	// interface
 	// json.NewDecoder takes io.Reader interface, not a concrete HTTP resp body
 	// http.Response.Body satisfy io.Reader
 	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
-		return weatherData{}, err
+		return 0, err
 	}
 
-	return d, nil
+    log.Printf("openWeatherMap: %s: %.2f", city, d.Main.Kelvin)
+    return d.Main.Kelvin, nil
 }
 
+// [!] so this is basically the cons of this kind of type system, recall me ML
+type multiWeatherProvider []weatherProvider
+
+func (w multiWeatherProvider) temperature(city string) (float64, error) {
+    sum := 0.0
+
+    for _, provider := range w {
+        k, err := provider.temperature(city)
+        if err != nil {
+            return 0, err
+        }
+
+        sum += k
+    }
+
+    return sum / float64(len(w)), nil
+}
+
+// http framework
 func main() {
+    mw := multiWeatherProvider{
+        openWeatherMap{apiKey: "6c68ab3ee677cf2fe425ff3ac9ab9b6f"},
+        openWeatherMap{apiKey: "354e7ad21558102181b0136a25f78c11"},
+    }
+
 	// HandlerFunc register "/" with hello for ServeMux(http router)
 	// "/" matches all path, not only the "/"
 	// first-class function
@@ -52,22 +87,28 @@ func main() {
 	// at first a mistype `HandleFunc` as `HandlerFunc` and the compiler
 	// report it poorly: ./main.go:62: too many arguments to conversion to http.HandlerFunc: http.HandlerFunc("/weather/", func literal)
 	http.HandleFunc("/weather/", func(w http.ResponseWriter, r *http.Request) {
+        begin := time.Now()
 		city := strings.SplitN(r.URL.Path, "/", 3)[2]
 
-		data, err := query(city)
+		temp, err := mw.temperature(city)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(data)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+            "city": city,
+            "temp": temp,
+            "took": time.Since(begin).String(),
+        })
 	})
 
 	http.ListenAndServe(":8080", nil)
 }
 
 // with a type system of strong, static, inferred
+// [!] so why still make programmer define the type???
 // http.HandlerFunc
 // server will spawn a new goroutine executing this for each request
 func hello(w http.ResponseWriter, r *http.Request) {
